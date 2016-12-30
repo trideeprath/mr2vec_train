@@ -99,6 +99,7 @@ from six.moves import xrange
 from types import GeneratorType
 
 logger = logging.getLogger(__name__)
+garbage_words = ["Rel:", "Sen:"]
 
 try:
     from gensim.models.word2vec_inner import train_batch_sg
@@ -146,6 +147,7 @@ except ImportError:
         return result
 
     '''
+
 
     def train_batch_cbow(model, sentences, alpha, work=None, neu1=None):
         """
@@ -195,7 +197,7 @@ except ImportError:
             l1 = np_sum(model.syn0[word2_indices], axis=0)
             l1 /= len(word2_indices)
             # word : Vocab object word to predict, word2_indices : input word indices, l1 : mean of vectors of the input vectors, alpha : learning rate
-            train_cbow_pair(model, word, word2_indices, l1, alpha)
+            train_cbow_pair_rel(model, word, word2_indices, l1, alpha)
             result += len(word_vocabs)
         return result
 
@@ -367,9 +369,11 @@ def train_cbow_pair_rel(model, word, input_word_indices, l1, alpha, learn_vector
             w = model.cum_table.searchsorted(model.random.randint(model.cum_table[-1]))
             if w != word.index:
                 word_indices.append(w)
+        #print([model.index2word[index] for index in input_word_indices], "--->", model.index2word[word.index])
+        #print([model.index2word[index] for index in word_indices])
         l2b = model.syn1neg[word_indices]  # 2d matrix, k+1 x layer1_size
         fb = expit(dot(l1, l2b.T))  # propagate hidden -> output
-        gb = (model.neg_labels - fb) * alpha  # vector of error gradients multiplied by the learning rate
+        gb = (model.neg_rel_labels - fb) * alpha  # vector of error gradients multiplied by the learning rate
         if learn_hidden:
             model.syn1neg[word_indices] += outer(gb, l1)  # learn hidden -> output
         neu1e += dot(gb, l2b)  # save error, this is Error which will be used for backpropagation
@@ -630,13 +634,14 @@ class Word2Vec(utils.SaveLoad):
             if sentence_no % progress_per == 0:
                 logger.info("PROGRESS: at sentence #%i, processed %i words, keeping %i word types",
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
-            for word in sentence:
+
+            for word in sentence[1:]:
                 vocab[word] += 1
 
             if self.max_vocab_size and len(vocab) > self.max_vocab_size:
                 total_words += utils.prune_vocab(vocab, min_reduce, trim_rule=trim_rule)
                 min_reduce += 1
-            if sentence_no % 1000 == 0:
+            if sentence_no % 10000000 == 0:
                 print(sentence_no)
 
         total_words += sum(itervalues(vocab))
@@ -836,7 +841,6 @@ class Word2Vec(utils.SaveLoad):
 
         tally += train_batch_sg(self, word_sentences, alpha, work)
         tally += train_batch_cbow_rel(self, relation_sentences, alpha, work, neu1)
-        #tally += train_batch_cbow(self, relation_sentences, alpha, work, neu1)
         return tally, self._raw_word_count(sentences)
 
 
@@ -861,10 +865,13 @@ class Word2Vec(utils.SaveLoad):
             warnings.warn("C extension not loaded for Word2Vec, training will be slow. "
                           "Install a C compiler and reinstall gensim_package for fast training.")
             self.neg_labels = []
+            self.neg_rel_labels = []
             if self.negative > 0:
                 # precompute negative labels optimization for pure-python training
                 self.neg_labels = zeros(self.negative + 1)
                 self.neg_labels[0] = 1.
+                self.neg_rel_labels = zeros(self.negative_rel +1)
+                self.neg_rel_labels[0] = 1.
 
         print("%i workers, %i vocabulary, %i features, sg=%s, hs=%s, sample=%s, negative=%s, window=%s" %(self.workers, len(self.vocab), self.layer1_size, self.sg, self.hs, self.sample, self.negative, self.window))
 
@@ -901,8 +908,8 @@ class Word2Vec(utils.SaveLoad):
                     progress_queue.put(None)
                     break  # no more jobs => quit this worker
                 sentences, alpha = job
-                #tally, raw_tally = self._do_train_job(sentences, alpha, (work, neu1))
-                tally, raw_tally = self._do_train_job_new(sentences, alpha, (work, neu1))
+                tally, raw_tally = self._do_train_job(sentences, alpha, (work, neu1))
+                #tally, raw_tally = self._do_train_job_new(sentences, alpha, (work, neu1))
                 progress_queue.put((len(sentences), tally, raw_tally))  # report back progress
                 jobs_processed += 1
             print("worker exiting, processed %i jobs"%(jobs_processed))
@@ -1778,7 +1785,7 @@ class Word2Vec(utils.SaveLoad):
                         (section['section'], 100.0 * correct / (correct + incorrect),
                          correct, correct + incorrect))
 
-    def accuracy(self, questions, restrict_vocab=30000, most_similar=most_similar, case_insensitive=True):
+    def accuracy(self, questions, restrict_vocab=30000, most_similar=most_similar, case_insensitive=True, print_all=False):
         """
         Compute accuracy of the model. `questions` is a filename where lines are
         4-tuples of words, split into sections by ": SECTION NAME" lines.
@@ -1837,12 +1844,14 @@ class Word2Vec(utils.SaveLoad):
                 self.vocab = original_vocab
                 for index in matutils.argsort(sims, reverse=True):
                     predicted = self.index2word[index].upper() if case_insensitive else self.index2word[index]
+                    #print("%s: expected %s, predicted %s", line.strip(), expected, predicted)
                     if predicted in ok_vocab and predicted not in ignore:
                         if predicted != expected:
                             logger.debug("%s: expected %s, predicted %s", line.strip(), expected, predicted)
                         break
                 if predicted == expected:
                     section['correct'].append((a, b, c, expected))
+                    #print(line.strip(), expected, predicted)
                 else:
                     section['incorrect'].append((a, b, c, expected))
         if section:
@@ -1855,6 +1864,7 @@ class Word2Vec(utils.SaveLoad):
             'correct': sum((s['correct'] for s in sections), []),
             'incorrect': sum((s['incorrect'] for s in sections), []),
         }
+
         self.log_accuracy(total)
         sections.append(total)
         return sections
